@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -45,6 +46,24 @@ func resourceKeyset() *schema.Resource {
 				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("REDISDB_DATABASE", "0"),
 			},
+			"bastion_host": {
+				Description: "Host to use as a bastion tunnel. Can be specified with the `BASTION_HOST` environment variable.",
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("BASTION_HOST", "nil"),
+			},
+			"bastion_user": {
+				Description: "User to connect to the bastion as. Can be specified with the `BASTION_USER` environment variable.",
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("BASTION_USER", ""),
+			},
+			"bastion_private_key": {
+				Description: "File containing the bastion private key. Can be specified with the `BASTION_PRIVATE_KEY` environment variable.",
+				Type:        schema.TypeString,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("BASTION_PRIVATE_KEY", ""),
+			},
 		},
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
@@ -53,9 +72,14 @@ func resourceKeyset() *schema.Resource {
 }
 
 func getRedisConnection(ctx context.Context, d *schema.ResourceData) (radix.Client, error) {
+	// SSH tunnel code from: https://elliotchance.medium.com/how-to-create-an-ssh-tunnel-in-go-b63722d682aa
+
 	hostname := d.Get("hostname").(string)
 	port := d.Get("port").(string)
 	database := d.Get("database").(string)
+	bastion_host := d.Get("bastion_host").(string)
+	bastion_user := d.Get("bastion_user").(string)
+	bastion_private_key := d.Get("bastion_private_key").(string)
 
 	cfg := radix.PoolConfig{
 		Dialer: radix.Dialer{
@@ -63,7 +87,23 @@ func getRedisConnection(ctx context.Context, d *schema.ResourceData) (radix.Clie
 		},
 	}
 
-	return cfg.New(ctx, "tcp", fmt.Sprintf("%s:%s", hostname, port))
+	if bastion_host != "" && bastion_user != "" && bastion_private_key != "" {
+		tunnel := NewSSHTunnel(
+			fmt.Sprintf("%s@%s", bastion_user, bastion_host),
+			PrivateKey([]byte(bastion_private_key)),
+			fmt.Sprintf("%s:%s", hostname, port),
+		)
+
+		// Start the server in the background. You will need to wait a
+		// small amount of time for it to bind to the localhost port
+		// before you can start sending connections.
+		go tunnel.Start()
+		time.Sleep(100 * time.Millisecond)
+
+		return cfg.New(ctx, "tcp", fmt.Sprintf("%s:%d", "127.0.0.1", tunnel.Local.Port))
+	} else {
+		return cfg.New(ctx, "tcp", fmt.Sprintf("%s:%s", hostname, port))
+	}
 }
 
 func resourceKeysetCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
