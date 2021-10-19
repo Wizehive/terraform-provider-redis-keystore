@@ -66,3 +66,4 @@ redis_data
 .terraform.lock.hcl
 .terraform
 terraform-provider-redis-keystore
+dist
